@@ -192,9 +192,12 @@ class GPRBaseline:
     def empirical_model(x, a, b, c):
         return a + b * np.exp(c * x)
 
-    def fit(self, cell_data, cell_key):
+        
+    def fit(self, cell_data, cell_key, initial_points=None):
+        ip = initial_points if initial_points is not None else self.initial_points
         # Force consistent key ordering: (Cell, Group)
         cell_key = (cell_key[0], cell_key[1])
+        ip = initial_points if initial_points is not None else self.initial_points
         ip = self.initial_points
 
         cell_data = cell_data.sort_values('RPT Number')
@@ -223,7 +226,9 @@ class GPRBaseline:
 
         self.gpr_models[cell_key] = gpr
 
-    def predict(self, cell_data, cell_key):
+     
+    def predict(self, cell_data, cell_key, initial_points=None):
+        ip = initial_points if initial_points is not None else self.initial_points
         cell_key = (cell_key[0], cell_key[1])
         ip = self.initial_points
 

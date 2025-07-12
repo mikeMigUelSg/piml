@@ -1,10 +1,8 @@
 """
-Generate and visualize capacity forecast trajectories and RMSE evolution
-for a chosen battery cell, using pre-trained PI-RNN, baseline RNN, and GPR models.
+Generate and visualize capacity forecast trajectories for a chosen battery cell,
+using pre-trained PI-RNN, baseline RNN, and GPR models.
 
-- Produce a 2*3 grid:
-   • Top row: true vs. predicted trajectories in three “life phases”  
-   • Bottom row: RMSE (log-scale) as a function of RPT origin (5-step forecast RMSE)  
+- Produce a 1×3 grid of larger plots showing true vs. predicted trajectories in three "life phases"
 9. Supports CLI flags:
    --group, --cell        : choose which cell to forecast  
    --fine-tune            : enable short fine-tuning  
@@ -23,7 +21,6 @@ import torch.optim as optim
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
 import random
 import warnings
 from copy import deepcopy
@@ -70,7 +67,7 @@ X_train_s, y_train, X_val_s, y_val, X_test_s, y_test, scaler, test_df = \
     load_battery_data(seed=seed)
 
 # Scenario‐3 constants
-h3 = 10
+h3 = 20
 input_size  = len(BATTERY_FEATURES) + 1
 hidden_size = 50
 
@@ -120,7 +117,7 @@ def trajectory_forecast(
                 BATTERY_TARGET: (v_prev + v_next) / 2
             })
 
-    # append & re‐sort only if there’s something to add
+    # append & re‐sort only if there's something to add
     if to_add:
         df = pd.concat([df, pd.DataFrame(to_add)], ignore_index=True)
         df = df.sort_values('RPT Number').reset_index(drop=True)
@@ -128,53 +125,23 @@ def trajectory_forecast(
     # available and future splits for scenario 3 forecasting
     avail = df[df['RPT Number'] <= h3]
     fut   = df[df['RPT Number'] >  h3]
-    fw    = fut.iloc[:h3]           # forecast window size = h3
-    n     = len(fw)
 
-    # handle fine-tuning on first 5 points of this cell
-    if fine_tune and len(avail) >= 10:
-        # clone models
-        m_clone = deepcopy(pi3)
-        b_clone = deepcopy(b3)
-        m_clone.train()
-        b_clone.train()
+    total_future = len(fut)
+    if total_future == 0:
+        raise ValueError(
+            f"{group}{cell} só tem {df['RPT Number'].max()} RPTs; "
+            f"impossível prever {h3} passos."
+        )
 
-        # prepare fine-tune data: first 5 points
-        raw_feats = avail[BATTERY_FEATURES].values[:10]
-        raw_tgts  = avail[BATTERY_TARGET].values[:10]
-        scaled_5  = scaler.transform(raw_feats)
+    # usar o que houver, mas nunca mais do que h3
+    fw = fut.iloc[:min(h3, total_future)]
+    n  = len(fw)
 
-        # make a 5-step sequence for fine-tuning
-        Xm, ym = make_sequences(scaled_5, raw_tgts, 10)
-        Xm_t = torch.tensor(Xm, dtype=torch.float32)
-        ym_t = torch.tensor(ym, dtype=torch.float32)
+    print("----: ", n, total_future)
 
-        opt_m = optim.Adam(m_clone.parameters(), lr=1e-3)
-        opt_b = optim.Adam(b_clone.parameters(), lr=1e-3)
-        loss_fn = nn.MSELoss()
 
-        for _ in range(fine_tune_epochs):
-            # fine-tune PI-RNN S3
-            opt_m.zero_grad()
-            p3 = m_clone(Xm_t, ym_t[:, :1], forecast_steps=10)
-            l3 = loss_fn(p3, ym_t)
-            l3.backward()
-            opt_m.step()
-
-            # fine-tune Baseline S3
-            opt_b.zero_grad()
-            bp = b_clone(Xm_t, ym_t[:, :1], forecast_steps=10)
-            lb = loss_fn(bp, ym_t)
-            lb.backward()
-            opt_b.step()
-
-        m_clone.eval()
-        b_clone.eval()
-        model = m_clone
-        baseline = b_clone
-    else:
-        model = pi3
-        baseline = b3
+    model = pi3
+    baseline = b3 
 
     # —————————————————————————————
     # 4. Precompute GPR trajectory
@@ -184,18 +151,23 @@ def trajectory_forecast(
 
     hybrid = []
     for origin in range(len(df)):
-        if origin + 1 < len(df):
-            _, yp = gpr.predict(
-                df.iloc[origin:].reset_index(drop=True),
-                (group, cell),
-                initial_points=1
-            )
-            hybrid.append(yp[0])
+        sub_df = df.iloc[origin:].reset_index(drop=True)
+        _, yp = gpr.predict(sub_df, (group, cell), initial_points=1)
+
+        # Handle empty prediction case
+        if yp.size == 0:           # no more data to predict
+            hybrid.append(np.nan)  # or simply break
+            continue
         else:
             hybrid.append(np.nan)
+        hybrid.append(yp[0])
+        
     y_pred_gpr = np.array(hybrid)
 
+    # —————————————————————————————
     # prepare future-window tensor for RNNs
+    # —————————————————————————————
+
     Xf = scaler.transform(fw[BATTERY_FEATURES].values)
     Xt = torch.tensor(Xf, dtype=torch.float32).unsqueeze(0)
     St = torch.tensor([[avail[BATTERY_TARGET].iloc[-1]]], dtype=torch.float32)
@@ -214,10 +186,12 @@ def trajectory_forecast(
             'baseline_rnn':   bb,
             'pi_rnn':         pp
         }
+    
+
     # —————————————————————————————
     # 5. Final Plotting 
     # —————————————————————————————
-    forecast_rpts     = [1, 9, 23]
+    forecast_rpts     = [1, 7, 23]
     forecast_horizons = [7, 13, 10]
     fixed_horizon     = 5
     red_contrast      = '#D62728'
@@ -225,20 +199,17 @@ def trajectory_forecast(
     hatches           = ['///','\\\\','...']
     phases            = ["(First-Life)","(Transition Phase)","(Second-Life)"]
 
-    fig = plt.figure(figsize=(16, 4), dpi=100, constrained_layout=True)
-    gs  = gridspec.GridSpec(2, 3, height_ratios=[2, 1])
-    ax_top  = [fig.add_subplot(gs[0, i]) for i in range(3)]
-    ax_rmse = [fig.add_subplot(gs[1, i]) for i in range(3)]
-    bar_width = 0.25
-
-    # --- TOP PANELS ---
+    # Create a single row of 3 larger plots
+    fig, axes = plt.subplots(1, 3, figsize=(20, 8), dpi=100)
+    
+    # --- CAPACITY PLOTS ---
     for i, (rpt, horizon, phase) in enumerate(zip(forecast_rpts, forecast_horizons, phases)):
         ava  = df[df['RPT Number'] <= rpt]
         fut_i= df[df['RPT Number'] >  rpt]
         fw_i = fut_i.iloc[:horizon]
         n_i  = len(fw_i)
 
-        ax = ax_top[i]
+        ax = axes[i]
         ax.axvline(x=rpt-1, color='black', linestyle='--', linewidth=1)
 
         # available
@@ -286,56 +257,6 @@ def trajectory_forecast(
         ax.set_ylim(0.4, 1.4)
         ax.tick_params(labelsize=20)
         ax.legend(loc='upper right', fontsize=14)
-
-    # --- BOTTOM PANELS: RMSE bars ---
-    origins = df['RPT Number'].astype(int).values
-    rmse_b, rmse_p, rmse_g = {}, {}, {}
-    for origin in origins:
-        ava = df[df['RPT Number'] <= origin]
-        fut_i = df[df['RPT Number'] > origin].iloc[:fixed_horizon]
-        if fut_i.empty: continue
-
-        raw = fut_i[BATTERY_FEATURES].values
-        Xf_i = scaler.transform(raw)
-        Xt_i = torch.tensor(Xf_i, dtype=torch.float32).unsqueeze(0)
-        St_i = torch.tensor([[ava[BATTERY_TARGET].iloc[-1]]], dtype=torch.float32)
-        with torch.no_grad():
-            bpr = baseline(Xt_i, St_i, forecast_steps=len(fut_i)).cpu().numpy().squeeze(0)
-            ppr = model   (Xt_i, St_i, forecast_steps=len(fut_i)).cpu().numpy().squeeze(0)
-        gslice = y_pred_gpr[origin:origin+len(fut_i)]
-        true_vals = fut_i[BATTERY_TARGET].values
-
-        rmse_b[origin] = np.sqrt(((bpr-true_vals)**2).mean())
-        rmse_p[origin] = np.sqrt(((ppr-true_vals)**2).mean())
-        rmse_g[origin] = np.sqrt(((gslice-true_vals)**2).mean())
-
-    complete_rpts      = np.arange(0, origins.max()+1)
-    full_rmse_b = np.array([rmse_b.get(r, np.nan) for r in complete_rpts])
-    full_rmse_p = np.array([rmse_p.get(r, np.nan) for r in complete_rpts])
-    full_rmse_g = np.array([rmse_g.get(r, np.nan) for r in complete_rpts])
-    for arr in (full_rmse_b, full_rmse_p, full_rmse_g):
-        if np.isnan(arr[0]) and len(arr)>1:
-            arr[0] = arr[1]
-
-    for ax in ax_rmse:
-        x = complete_rpts
-        ax.bar(x - bar_width, full_rmse_g, bar_width,
-               edgecolor=red_contrast, color=light_red, hatch=hatches[2],
-               label='Baseline GPR')
-        ax.bar(x,           full_rmse_b, bar_width,
-               edgecolor=red_contrast, color=light_red, hatch=hatches[0],
-               label='Baseline RNN')
-        ax.bar(x + bar_width, full_rmse_p, bar_width,
-               edgecolor=red_contrast, color=light_red, hatch=hatches[1],
-               label='PI-RNN')
-
-        ax.set_yscale('log')
-        ax.set_xlabel('RPT Number (-)', fontsize=20)
-        ax.set_ylabel('RMSE (Ah)', fontsize=20)
-        ax.set_xticks(np.arange(0, 35, 5))
-        ax.set_xlim(-2, 35)
-        ax.legend(loc='upper center', ncol=3, fontsize=12, bbox_to_anchor=(0.5,1.3))
-        ax.tick_params(labelsize=14)
 
     plt.tight_layout()
     plt.show()

@@ -61,7 +61,7 @@ target   = BATTERY_TARGET
 # —————————————————————————————
 # 3. Build sequences for scenarios
 # —————————————————————————————
-h1, h2, h3 = 7, 1, 10
+h1, h2, h3 = 7, 1, 20
 X_tr1, y_tr1 = make_sequences(X_train_s, y_train, h1)
 X_va1, y_va1 = make_sequences(X_val_s,   y_val,   h1)
 X_tr2, y_tr2 = make_sequences(X_train_s, y_train, h2)
