@@ -65,8 +65,8 @@ BATTERY_TARGET = 'Capacity'
 
 # group filters
 TEST_EXCLUDE_GROUPS  = ['G12']
-TRAIN_EXCLUDE_GROUPS = ['G11','G14']
-TRAIN_CELLS          = ['C1','C3']
+TRAIN_EXCLUDE_GROUPS = []
+TRAIN_CELLS          = ['C1','C2','C3']
 
 # validation split
 VAL_CELL_COUNT = 3
@@ -130,6 +130,7 @@ def load_battery_data(seed: int = 40):
     tv = b2[~b2['Group'].isin(TRAIN_EXCLUDE_GROUPS)].dropna()
     tv = tv[tv['Cell'].isin(TRAIN_CELLS)].copy()
 
+    test_df['Unique_Cell_ID'] = test_df['Group'] + '-' + test_df['Cell']
     tv['Unique_Cell_ID'] = tv['Group'] + '-' + tv['Cell']
     ids = tv['Unique_Cell_ID'].unique().tolist()
     val_ids = random.sample(ids, VAL_CELL_COUNT)
@@ -147,7 +148,7 @@ def load_battery_data(seed: int = 40):
     X_test_s  = scaler.transform(test_df[BATTERY_FEATURES])
     y_test    = test_df[BATTERY_TARGET].values
 
-    return X_train_s, y_train, X_val_s, y_val, X_test_s, y_test, scaler, test_df
+    return X_train_s, y_train, X_val_s, y_val, X_test_s, y_test, scaler, test_df, tv
 
 # —————————————————————————————
 # 4. Sequence builder for RNN

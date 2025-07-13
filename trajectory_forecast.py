@@ -1,8 +1,9 @@
 """
-Generate and visualize capacity forecast trajectories for a chosen battery cell,
-using pre-trained PI-RNN, baseline RNN, and GPR models.
+Generate and visualize capacity forecast trajectories
+for a chosen battery cell, using pre-trained PI-RNN and baseline RNN models.
 
-- Produce a 1×3 grid of larger plots showing true vs. predicted trajectories in three "life phases"
+- Produce a 1*3 grid:
+   • Single row: true vs. predicted trajectories in three "life phases"  
 9. Supports CLI flags:
    --group, --cell        : choose which cell to forecast  
    --fine-tune            : enable short fine-tuning  
@@ -21,6 +22,7 @@ import torch.optim as optim
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
 import random
 import warnings
 from copy import deepcopy
@@ -63,7 +65,7 @@ rf_model, scaler_sim = train_pbm_surrogate_for_PI_RNN(
 # —————————————————————————————
 # 2. Load & preprocess battery data
 # —————————————————————————————
-X_train_s, y_train, X_val_s, y_val, X_test_s, y_test, scaler, test_df = \
+X_train_s, y_train, X_val_s, y_val, X_test_s, y_test, scaler, test_df, tv = \
     load_battery_data(seed=seed)
 
 # Scenario‐3 constants
@@ -98,6 +100,8 @@ def trajectory_forecast(
     )
     df[BATTERY_FEATURES] = df[BATTERY_FEATURES].fillna(0)
 
+
+
     # --- fill any single‐gap RPT numbers by neighbor‐averaging ---
     rpts = df['RPT Number']
     min_rpt, max_rpt = rpts.min(), rpts.max()
@@ -110,11 +114,14 @@ def trajectory_forecast(
     for m in missing_rpts:
         prev_r, next_r = m - 1, m + 1
         if prev_r in rpts.values and next_r in rpts.values:
-            v_prev = df.loc[df['RPT Number'] == prev_r, BATTERY_TARGET].iloc[0]
-            v_next = df.loc[df['RPT Number'] == next_r, BATTERY_TARGET].iloc[0]
+            v_prev = df.loc[df['RPT Number']==prev_r, BATTERY_TARGET].iloc[0]
+            v_next = df.loc[df['RPT Number']==next_r, BATTERY_TARGET].iloc[0]
+            f_prev = df.loc[df['RPT Number']==prev_r, BATTERY_FEATURES].iloc[0]
+            f_next = df.loc[df['RPT Number']==next_r, BATTERY_FEATURES].iloc[0]
             to_add.append({
                 'RPT Number': m,
-                BATTERY_TARGET: (v_prev + v_next) / 2
+                **{BATTERY_TARGET: (v_prev+v_next)/2},
+                **{feat: (f_prev[feat]+f_next[feat])/2 for feat in BATTERY_FEATURES}
             })
 
     # append & re‐sort only if there's something to add
@@ -122,52 +129,22 @@ def trajectory_forecast(
         df = pd.concat([df, pd.DataFrame(to_add)], ignore_index=True)
         df = df.sort_values('RPT Number').reset_index(drop=True)
 
+    print("RPTs disponíveis:", df[BATTERY_TARGET])
+    print("Total de linhas:", len(df))
+    print("Máximo RPT Number:", df['RPT Number'].max())
+
     # available and future splits for scenario 3 forecasting
     avail = df[df['RPT Number'] <= h3]
     fut   = df[df['RPT Number'] >  h3]
-
-    total_future = len(fut)
-    if total_future == 0:
-        raise ValueError(
-            f"{group}{cell} só tem {df['RPT Number'].max()} RPTs; "
-            f"impossível prever {h3} passos."
-        )
-
-    # usar o que houver, mas nunca mais do que h3
-    fw = fut.iloc[:min(h3, total_future)]
-    n  = len(fw)
-
-    print("----: ", n, total_future)
+    fw    = fut.iloc[:h3]           # forecast window size = h3
+    n     = len(fw)
 
 
     model = pi3
-    baseline = b3 
+    baseline = b3
 
-    # —————————————————————————————
-    # 4. Precompute GPR trajectory
-    # —————————————————————————————
-    gpr = GPRBaseline(initial_points=10)
-    gpr.fit(df, (group, cell), initial_points=10)
 
-    hybrid = []
-    for origin in range(len(df)):
-        sub_df = df.iloc[origin:].reset_index(drop=True)
-        _, yp = gpr.predict(sub_df, (group, cell), initial_points=1)
-
-        # Handle empty prediction case
-        if yp.size == 0:           # no more data to predict
-            hybrid.append(np.nan)  # or simply break
-            continue
-        else:
-            hybrid.append(np.nan)
-        hybrid.append(yp[0])
-        
-    y_pred_gpr = np.array(hybrid)
-
-    # —————————————————————————————
     # prepare future-window tensor for RNNs
-    # —————————————————————————————
-
     Xf = scaler.transform(fw[BATTERY_FEATURES].values)
     Xt = torch.tensor(Xf, dtype=torch.float32).unsqueeze(0)
     St = torch.tensor([[avail[BATTERY_TARGET].iloc[-1]]], dtype=torch.float32)
@@ -182,32 +159,31 @@ def trajectory_forecast(
             'available_idx': avail.index.values,
             'forecast_idx':  fw.index.values,
             'true_values':   fw[BATTERY_TARGET].values,
-            'gpr':            y_pred_gpr[h3:h3+n],
             'baseline_rnn':   bb,
             'pi_rnn':         pp
         }
-    
-
     # —————————————————————————————
     # 5. Final Plotting 
     # —————————————————————————————
-    forecast_rpts     = [1, 7, 23]
-    forecast_horizons = [7, 13, 10]
+    forecast_rpts     = [1, 5, 15]
+    forecast_horizons = [29, 29, 18]
+
     fixed_horizon     = 5
     red_contrast      = '#D62728'
     light_red         = '#F5B7B1'
     hatches           = ['///','\\\\','...']
-    phases            = ["(First-Life)","(Transition Phase)","(Second-Life)"]
+    phases            = ["(primeiro)","(segundo)","(terceiro)"]
 
-    # Create a single row of 3 larger plots
-    fig, axes = plt.subplots(1, 3, figsize=(20, 8), dpi=100)
+    # Modified to single row with bigger plots
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6), dpi=100)
     
-    # --- CAPACITY PLOTS ---
+    # --- TOP PANELS (now the only panels) ---
     for i, (rpt, horizon, phase) in enumerate(zip(forecast_rpts, forecast_horizons, phases)):
         ava  = df[df['RPT Number'] <= rpt]
         fut_i= df[df['RPT Number'] >  rpt]
         fw_i = fut_i.iloc[:horizon]
         n_i  = len(fw_i)
+        print(len(fut_i))        # 20
 
         ax = axes[i]
         ax.axvline(x=rpt-1, color='black', linestyle='--', linewidth=1)
@@ -226,12 +202,6 @@ def trajectory_forecast(
                 'ko-', markersize=12, linewidth=1.5,
                 markerfacecolor='white', label='True Capacity')
 
-        # GPR
-        gpr_fc = y_pred_gpr[rpt:rpt+n_i]
-        ax.plot(fw_i.index, gpr_fc,
-                marker='^', color='crimson', markersize=8,
-                linestyle='-.', linewidth=0.5, label='Baseline GPR')
-
         # RNNs
         raw = fw_i[BATTERY_FEATURES].values
         Xf_i  = scaler.transform(raw)
@@ -241,9 +211,8 @@ def trajectory_forecast(
             bb_i = baseline(Xt_i, St_i, forecast_steps=n_i).cpu().numpy().squeeze(0)
             pp_i = model   (Xt_i, St_i, forecast_steps=n_i).cpu().numpy().squeeze(0)
 
-        ax.plot(fw_i.index, bb_i,
-                's', color='crimson', markersize=8,
-                linestyle='--', linewidth=0.5, label='Baseline RNN')
+        print("- ", len(pp_i)) 
+        print(pp_i)
         ax.plot(fw_i.index, pp_i,
                 'd', color='crimson', markersize=8,
                 linestyle='-', linewidth=0.5, label='PI-RNN')
@@ -258,6 +227,7 @@ def trajectory_forecast(
         ax.tick_params(labelsize=20)
         ax.legend(loc='upper right', fontsize=14)
 
+   
     plt.tight_layout()
     plt.show()
 
