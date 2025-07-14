@@ -202,7 +202,7 @@ def trajectory_forecast_multi_cell(
     # —————————————————————————————
     # 5. Multi-cell Plotting 
     # —————————————————————————————
-    forecast_rpts     = [1, 10, 15]
+    forecast_rpts     = [1, 5, 15]
     forecast_horizons = [29, 29, 18]
     phases            = ["(primeiro)","(segundo)","(terceiro)"]
     
