@@ -116,7 +116,14 @@ def trajectory_forecast_single_cell(
         .sort_values('RPT Number')
         .reset_index(drop=True)
     )
-    df[BATTERY_FEATURES] = df[BATTERY_FEATURES].fillna(0)
+    df2 = (
+        tv
+        .loc[lambda d: (d['Group']==group) & (d['Cell']==cell)]
+        .sort_values('RPT Number')
+        .reset_index(drop=True)
+    )
+    df = pd.concat([df, df2], axis=0, ignore_index=True)
+    
 
     # --- fill any single‐gap RPT numbers by neighbor‐averaging ---
     rpts = df['RPT Number']
